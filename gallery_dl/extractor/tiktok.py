@@ -12,6 +12,8 @@ import base64
 import functools
 import itertools
 import random
+import re
+import sqlite3
 import time
 
 BASE_PATTERN = r"(?:https?://)?(?:www\.)?tiktokv?\.com"
@@ -39,9 +41,46 @@ class TiktokExtractor(Extractor):
         self.range = self.config("tiktok-range") or ""
         self.range_predicate = util.RangePredicate(self.range)
 
+        # Optional cheap pre-check against a --download-archive database,
+        # keyed just by post id (ignoring num/file_id), so an already-fully-
+        # archived post can be skipped before paying for the expensive
+        # per-post page fetch (+ JS-challenge resolution) that
+        # _extract_rehydration_data() always performs. --download-archive
+        # itself only skips the final media download, which happens *after*
+        # that fetch, so on its own it doesn't save anything for re-scrapes
+        # of already-archived content. Opt-in: only active if configured.
+        self._archive_precheck_db = None
+        archive_precheck_path = self.config("archive-precheck")
+        if archive_precheck_path:
+            try:
+                self._archive_precheck_db = sqlite3.connect(
+                    archive_precheck_path, check_same_thread=False)
+            except Exception:
+                self._archive_precheck_db = None
+
+    def _archive_precheck_skip(self, tiktok_url):
+        """True if every file for this post id is already in the archive."""
+        if self._archive_precheck_db is None:
+            return False
+        match = re.search(r"/video/(\d+)", tiktok_url)
+        if not match:
+            return False
+        try:
+            row = self._archive_precheck_db.execute(
+                "SELECT 1 FROM archive WHERE entry LIKE ? LIMIT 1",
+                (f"{self.category}{match.group(1)}_%",),
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
     def items(self):
         for tiktok_url in self.posts():
             tiktok_url = self._sanitize_url(tiktok_url)
+
+            if self._archive_precheck_skip(tiktok_url):
+                self.log.debug("%s: already archived, skipping", tiktok_url)
+                continue
 
             data = self._extract_rehydration_data(tiktok_url)
             if "webapp.video-detail" not in data:
