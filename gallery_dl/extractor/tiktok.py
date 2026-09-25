@@ -1044,6 +1044,19 @@ class TiktokStoryTimeCursor(TiktokTimeCursor):
         super().__init__(reverse=False, has_more_attribute="HasMoreAfter",
                          cursor_attribute="MaxCursor")
 
+    def next_page(self, data, query_parameters):
+        # A user with no live stories is answered with TotalCount 0,
+        # MaxCursor 0, HasMoreAfter false and no itemList. That is a complete
+        # (empty) result. Passed to TiktokTimeCursor it raises "Could not
+        # extract next cursor", which execute() retries with a sleep and then
+        # reports as a failure, so every story-less user costs the full retry
+        # budget and looks the same as a blocked request. TotalCount arrives
+        # as a string ("0"), hence the str() comparison.
+        if str(data.get("TotalCount")) == "0" and \
+                not data.get(self.has_more_key):
+            return True
+        return super().next_page(data, query_parameters)
+
 
 class TiktokLegacyTimeCursor(TiktokPaginationCursor):
     def __init__(self):
@@ -1547,6 +1560,13 @@ class TiktokStoryItemListRequest(TiktokItemListRequest):
         assert "authorId" in query_parameters
         assert "loadBackward" in query_parameters
         assert query_parameters["loadBackward"] in ["true", "false"]
+
+    def extract_items(self, data):
+        # See TiktokStoryTimeCursor.next_page: no itemList with TotalCount 0
+        # means no live stories, not a failed page, so do not flag it.
+        if "itemList" not in data and str(data.get("TotalCount")) == "0":
+            return {}
+        return super().extract_items(data)
 
     def cursor_type(self, query_parameters):
         return TiktokStoryTimeCursor
