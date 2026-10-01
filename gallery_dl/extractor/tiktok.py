@@ -395,7 +395,9 @@ class TiktokExtractor(Extractor):
 
     def _extract_sec_uid(self, profile_url, user_name):
         sec_uid = self._extract_id(
-            profile_url, user_name, r"MS4wLjABAAAA[\w-]{64}", "secUid")
+            # Any length: most secUids are 64 characters after the prefix,
+            # but some accounts have shorter ones (43 seen).
+            profile_url, user_name, r"MS4wLjABAAAA[\w-]+", "secUid")
         if sec_uid is None:
             raise exception.AbortExtraction(
                 f"{user_name}: unable to extract secondary user ID")
