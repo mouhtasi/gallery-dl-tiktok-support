@@ -425,7 +425,16 @@ class TiktokExtractor(Extractor):
 
     def _extract_video(self, post, given_url):
         video = post["video"]
-        urls = self._extract_video_urls(video, given_url)
+        # TikTok can answer with a complete post and an empty playAddr; a
+        # TikTok Shop video on the web is the common case. An empty string
+        # is not a URL: kept in the list it became urls[0], and items() then
+        # skipped the video without logging anything.
+        urls = [url for url in self._extract_video_urls(video, given_url)
+                if url]
+        if not urls and "playAddr" in video:
+            urls = self._extract_player_api_urls(post, given_url)
+            if not urls:
+                return None
         if not urls:
             raise exception.ExtractionError(f"{given_url}: Failed to extract "
                                             "video URLs, you may need cookies "
@@ -476,6 +485,63 @@ class TiktokExtractor(Extractor):
         # necessarily point to the best quality.
         if "playAddr" in video:
             urls.append(video["playAddr"])
+        return urls
+
+    def _extract_player_api_urls(self, post, given_url):
+        """Video URLs for a post whose page offers no play address
+
+        The embedded player's API still serves the file for TikTok Shop
+        videos, which the website refuses to play ("Watch TikTok Shop
+        videos in the TikTok app"). It takes one post ID per request and
+        needs the query parameters below; it needs no cookies.
+        """
+        shop = "33" in map(str, post.get("AnchorTypes") or ())
+        kind = "TikTok Shop video" if shop else "video"
+        params = {
+            "item_ids"       : post["id"],
+            "language"       : "en",
+            "aid"            : "1284",
+            "app_name"       : "tiktok_web",
+            "device_platform": "web_pc",
+        }
+        response = self.request(
+            f"{self.root}/player/api/v1/items", params=params, fatal=False)
+        try:
+            data = util.json_loads(response.text)
+            item = (data.get("items") or ({},))[0]
+            code = (data.get("results") or ({},))[0].get("code") or ""
+        except Exception:
+            self.log.error(
+                "%s: No play address on the page for this %s, and the "
+                "player API request failed (HTTP %s)",
+                given_url, kind, response.status_code)
+            return []
+
+        video_info = item.get("video_info") or {}
+        # The top-level list is the best file on offer. Where a plain
+        # profile exists it is the same file; for a Shop video with only
+        # 'ecom_hiddenwm' profiles it is several times larger than any of
+        # them. Keep the profiles, largest first, as fallbacks.
+        urls = list(video_info.get("url_list") or ())
+        profiles = sorted(
+            video_info.get("profiles") or (),
+            key=lambda p: text.parse_int(
+                (p.get("play_addr") or {}).get("data_size")),
+            reverse=True)
+        for profile in profiles:
+            for url in (profile.get("play_addr") or {}).get("url_list") or ():
+                if url not in urls:
+                    urls.append(url)
+        urls = [url for url in urls if url]
+
+        if not urls:
+            self.log.error(
+                "%s: No play address offered for this %s (player API: %s)",
+                given_url, kind, code or "no item")
+            return []
+        self.log.info(
+            "%s: No play address on the page for this %s, using the "
+            "player API", given_url, kind)
         return urls
 
     def _extract_audio(self, post):
