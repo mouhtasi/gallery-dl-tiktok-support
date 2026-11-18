@@ -446,7 +446,11 @@ class TiktokExtractor(Extractor):
             "type"      : "video",
             "image"     : None,
             "title"     : post["desc"] or f"TikTok video #{post['id']}",
-            "duration"  : video.get("duration"),
+            # A post the relay serves has duration 0 on the page; tiktak
+            # reads a short duration as a still and plays its frame, so the
+            # relay's real length takes the empty one's place.
+            "duration"  : video.get("duration") or
+            post.pop("_relay_duration", None) or video.get("duration"),
             "num"       : 0,
             "img_id"    : "",
             "audio_id"  : "",
@@ -534,14 +538,74 @@ class TiktokExtractor(Extractor):
                     urls.append(url)
         urls = [url for url in urls if url]
 
+        if urls:
+            self.log.info(
+                "%s: No play address on the page for this %s, using the "
+                "player API", given_url, kind)
+            return urls
+        urls = self._extract_relay_urls(post, given_url, kind)
         if not urls:
+            # tiktak classes this line (failure_reasons.NO_FILE): keep it.
             self.log.error(
                 "%s: No play address offered for this %s (player API: %s)",
                 given_url, kind, code or "no item")
+        return urls
+
+    RELAY_API = "https://www.tikwm.com/api/"
+    # The relay's files are plain addresses on TikTok's own CDN. Anything
+    # else (a relative path, the relay's own host) is not taken.
+    RELAY_FILE_HOSTS = (".tiktokcdn.com", ".tiktokcdn-us.com")
+
+    def _extract_relay_urls(self, post, given_url, kind):
+        """Video URLs from the tikwm relay, when the page and the player API
+        both offer none. Off unless 'relay-fallback' is set.
+
+        The relay reads TikTok's app API, which still serves files the web
+        withholds: 37 of 41 such posts on 2026-11-17, 34 of them TikTok Shop
+        videos the player API answered with code 'ok' and no address. The
+        page's metadata is kept; only the file address comes from the relay.
+
+        'hdplay' first: the page's best listed file for an ordinary post,
+        and for those 37 an hvc1 HEVC file with more pixels than 'play',
+        which is the player API's own H.264 file. A relay answer with size
+        0 named a dead address on 4 of 4 posts, so it counts as no file.
+        """
+        if not self.config("relay-fallback", False):
             return []
+        try:
+            # tikwm's Cloudflare refuses some user agents (403 to Python's
+            # default on 41 of 41 calls); the browser one gallery-dl sends
+            # passed. It can take over 20 s to answer.
+            response = self.request(
+                self.RELAY_API, params={"url": given_url, "hd": "1"},
+                fatal=False, timeout=60, retries=1)
+            data = util.json_loads(response.text)
+        except Exception as exc:
+            self.log.warning("%s: the relay request failed (%s)",
+                             given_url, exc.__class__.__name__)
+            return []
+        info = data.get("data") if data.get("code") == 0 else None
+        if not info or str(info.get("id")) != str(post["id"]):
+            self.log.warning("%s: the relay has no answer for this %s (%s)",
+                             given_url, kind, data.get("msg"))
+            return []
+        urls = []
+        for key, size in (("hdplay", "hd_size"), ("play", "size")):
+            url = info.get(key) or ""
+            host = text.root_from_url(url).partition("://")[2]
+            if text.parse_int(info.get(size)) > 0 and \
+                    url.startswith("https://") and \
+                    host.endswith(self.RELAY_FILE_HOSTS):
+                urls.append(url)
+        if not urls:
+            self.log.warning("%s: the relay names no live file for this %s",
+                             given_url, kind)
+            return []
+        if text.parse_int(info.get("duration")) > 0:
+            post["_relay_duration"] = text.parse_int(info["duration"])
         self.log.info(
-            "%s: No play address on the page for this %s, using the "
-            "player API", given_url, kind)
+            "%s: No play address on the page or the player API for this %s, "
+            "using the relay", given_url, kind)
         return urls
 
     def _extract_audio(self, post):
