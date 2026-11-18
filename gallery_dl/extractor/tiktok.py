@@ -576,9 +576,23 @@ class TiktokExtractor(Extractor):
             # tikwm's Cloudflare refuses some user agents (403 to Python's
             # default on 41 of 41 calls); the browser one gallery-dl sends
             # passed. It can take over 20 s to answer.
+            #
+            # 429 is 'expected' so it comes back at once. Otherwise
+            # request() sleeps 'sleep-429' (60 s by default) and then logs
+            # "'429 Too Many Requests' for …", which a caller watching for
+            # TikTok's own throttling would read as TikTok's. No retry: the
+            # caller retries the post later.
             response = self.request(
                 self.RELAY_API, params={"url": given_url, "hd": "1"},
-                fatal=False, timeout=60, retries=1)
+                fatal=False, timeout=60, retries=0, expected=(429,))
+            code = response.status_code
+            if code >= 400:
+                # A 5xx comes back as util.NullResponse, status 900, after
+                # request() has logged its own line for it.
+                self.log.warning(
+                    "%s: the relay request failed (%s)", given_url,
+                    f"HTTP {code}" if code < 900 else "server error")
+                return []
             data = util.json_loads(response.text)
         except Exception as exc:
             self.log.warning("%s: the relay request failed (%s)",
